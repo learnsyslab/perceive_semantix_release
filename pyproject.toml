@@ -1,0 +1,77 @@
+[project]
+authors = [{name = "Benjamin Bogenberger", email = "benjamin.bogenberger@tum.de"}]
+name = "perceive_semantix_package"
+requires-python = "== 3.11"
+version = "0.1.0" 
+
+[tool.pixi.workspace]
+channels = ["robostack-humble", "conda-forge"]
+platforms = ["linux-64"]
+preview = ["pixi-build"]
+
+[tool.pixi.dependencies]
+perceive_semantix_lib = { path = "perceive_semantix_lib"}
+ros-humble-desktop = "*"
+py-opencv = "*"
+jaxtyping = "*"
+colcon-common-extensions = "*"
+pip = ">=25.3,<26"
+pytorch3d = "*"
+
+[tool.pixi.pypi-dependencies]
+clip = { git = "https://github.com/openai/CLIP.git" } # required by ultralytics when calling set_classes
+torch = { version = "*", index = "https://download.pytorch.org/whl/nightly/cu128" }
+torchvision = { version = "*", index = "https://download.pytorch.org/whl/nightly/cu128" }
+open3d = ">=0.19"
+numpy = "*"
+scipy = "*"
+
+[tool.pixi.system-requirements]
+cuda = "12.8"
+libc = "2.31"
+
+[tool.pixi.feature.zenoh.dependencies]
+ros-humble-rmw-zenoh-cpp = "==0.1.2"
+
+[tool.pixi.feature.zenoh.activation.env]
+# use Zenoh as RMW implementation
+RMW_IMPLEMENTATION = "rmw_zenoh_cpp"
+
+[tool.pixi.feature.fastrtps.activation.env]
+# use Fast-RTPS as RMW implementation
+RMW_IMPLEMENTATION="rmw_fastrtps_cpp"
+ROS_DISCOVERY_SERVER="127.0.0.1:14520"
+
+[tool.pixi.feature.formatting.dependencies]
+ruff = "*"
+pre-commit = "*"
+
+[tool.pixi.feature.profiling.dependencies]
+snakeviz = ">=2.2.2,<3"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "D", "I"]
+ignore = ["F722", "F821", "D101", "D100", "D102", "D104", "D107", "D203", "D213"]
+
+[tool.ruff.lint.isort]
+sections = {"ros" = ["ament_index_python", "message_filters", "rcl_interfaces", "rclpy", "std_msgs", "sensor_msgs", "geometry_msgs", "visualization_msgs", "nav_msgs", "tf2_ros"]}
+section-order = ["future", "standard-library", "third-party", "ros", "first-party", "local-folder"]
+known-first-party = ["perceive_semantix_lib", "perceive_semantix_interfaces"]
+known-local-folder = ["perceive_semantix_ros2"]
+
+[tool.pixi.feature.typecheck.activation]
+env = { ENABLE_RUNTIME_TYPECHECKING = "1" }
+
+[tool.pixi.activation]
+scripts = ["export_secrets.sh"]
+
+[tool.pixi.environments]
+default = {features = [], solve-group = "default"}
+dev = { features = ["typecheck", "formatting", "profiling"], solve-group = "default"}
+profiling = { features = ["profiling"], solve-group = "default"}
+zenoh = { features = ["zenoh"], solve-group = "default"}
+fastrtps = {features = ["fastrtps"], solve-group = "default"}
+

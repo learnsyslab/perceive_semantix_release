@@ -1,0 +1,11 @@
+[package]
+name = "perceive_semantix_interfaces"
+version = "0.0.1"
+
+[package.build]
+channels = [
+  "https://prefix.dev/pixi-build-backends",
+  "https://prefix.dev/conda-forge",
+]
+backend = { name = "pixi-build-ros", version = "*"}
+configuration = { distro = "humble" }

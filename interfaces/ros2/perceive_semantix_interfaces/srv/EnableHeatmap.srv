@@ -1,0 +1,7 @@
+# perceive_semantix_interfaces/srv/EnableHeatmap.srv
+
+# Request
+string input
+---
+# Response
+bool success

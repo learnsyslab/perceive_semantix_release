@@ -1,0 +1,28 @@
+.vscode/
+__pycache__/
+dist/
+/Pipfile.lock
+.pytest_cache/
+.ruff_cache/
+
+# pixi environments
+.pixi/
+!.pixi/config.toml
+
+# example data
+example_data/input_streams/ros_bags/
+example_data/input_streams/raw/**
+!example_data/input_streams/raw/*.zip
+
+# ROS2 build files
+build/
+install/
+log/
+
+# project output and caches
+scene_*/
+__model_cache__/
+__openai_cache__/
+
+# api keys
+export_secrets.sh
