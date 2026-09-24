@@ -56,6 +56,8 @@ class GeometryBase:
         img_width: int,
         min_depth: float,
         max_depth: float,
+        occluding_margin: float,
+        depth_image: Optional[Float[torch.Tensor, "1 H W"]] = None,
         device: str = "cuda",
         preallocated_object_mask_count: int = 10,
         expected_visibility_threshold: float = 0.1,
@@ -70,6 +72,8 @@ class GeometryBase:
             img_width (int): Image width to project on (in pixels).
             min_depth (float): Minimum depth to consider (in m).
             max_depth (float): Maximum depth to consider (in m).
+            occluding_margin (float): Margin in meters to consider for occlusion. If > 0, the function will also take in an optional depth image of the occluding geometry and use it to erase occluded regions in the projections.
+            depth_image (Optional[Float[torch.Tensor, "1 H W"]]): Optional depth image of the occluding geometry.
             device (str): Device to use for computation.
             preallocated_object_mask_count (int): How many object mask arrays should be preallocated. This should be slighly larger than the average number of expected objects in each frame.
             expected_visibility_threshold (float): Minimum visibility ratio for an object to be considered visible.

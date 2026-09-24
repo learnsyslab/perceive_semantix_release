@@ -76,6 +76,19 @@ def merge_rgb_fields(cloud_arr):
     return new_cloud_arr
 
 
+def xyz_field_to_pointcloud2(positions, field_name, field_values, stamp=None, frame_id=None):
+    """Build a PointCloud2 from an (N, 3) position array plus a single named float32 scalar field (e.g. intensity, probability)."""
+    structured_array = np.zeros(
+        len(positions),
+        dtype=[("x", np.float32), ("y", np.float32), ("z", np.float32), (field_name, np.float32)],
+    )
+    structured_array["x"] = positions[:, 0]
+    structured_array["y"] = positions[:, 1]
+    structured_array["z"] = positions[:, 2]
+    structured_array[field_name] = field_values
+    return array_to_pointcloud2(structured_array, stamp=stamp, frame_id=frame_id)
+
+
 def array_to_pointcloud2(cloud_arr, stamp=None, frame_id=None):
     """Convert a numpy record array to a sensor_msgs.msg.PointCloud2."""
     # make it 2d (even if height will be 1)

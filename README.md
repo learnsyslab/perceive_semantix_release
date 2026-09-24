@@ -16,8 +16,11 @@ Orrin Dahanaggamaarachchi<sup>1</sup>,
 [![IEEE RA-L](https://img.shields.io/badge/IEEE%20RA--L-2026-blue)](https://doi.org/10.1109/LRA.2026.3656790)
 [![arXiv](https://img.shields.io/badge/arXiv-2509.19851-b31b1b.svg)](https://arxiv.org/abs/2509.19851)
 [![Website](https://img.shields.io/badge/Website-Project%20Page-2ea44f)](https://utiasdsl.github.io/semi-static-semantic-exploration/)
-[![Python >=3.11](https://img.shields.io/badge/Python-%3E%3D3.11-3776AB.svg)](https://www.python.org/)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB.svg)](https://www.python.org/)
 [![CUDA 12.x](https://img.shields.io/badge/CUDA-12.x-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
+
+![Semantic map built from the example ROS bag, shown in Rerun](.github/images/rerun-example.jpg)
+_Semantic map of an office built from the example ROS bag: background OctoMap, tracked object instances with open-vocabulary labels, camera trajectory (red), per-object stationarity estimates (top right) and the current camera image (bottom right)._
 
 Official perception pipeline of _Where Did I Leave My Glasses? Open-Vocabulary Semantic Exploration in Real-World Semi-Static Environments_. This includes the blocks Sec. IV-A (green), Sec. IV-B (red), and Sec. IV-C (orange). Input data are posed RGB-D frames $\mathbf{F}_t$ and optionally a user query $\mathbf{q}$.
 
@@ -43,7 +46,7 @@ Official perception pipeline of _Where Did I Leave My Glasses? Open-Vocabulary S
             color=color_img,
             depth=depth_img,
             pose=camera_pose,
-        ),  
+        ),
     )
     scene.step(input)
     ```
@@ -68,7 +71,7 @@ Official perception pipeline of _Where Did I Leave My Glasses? Open-Vocabulary S
 - Source the package `source install/setup.bash`
 - Run (this will create some cache folders including downloaded model weights (if not already present) and create a logging directory)
     ```bash
-    ros2 run perceive_semantix_ros2 perceive_semantix_node --ros-args -p image_rotations_clockwise:=-1 -p store_output:=False -p initial_scene_path:=$PIXI_PROJECT_ROOT/example_data/premapped_scenes/scene_office_legacy.pkl
+    ros2 run perceive_semantix_ros2 perceive_semantix_node --ros-args -p image_rotations_clockwise:=-1 -p store_output:=False -p initial_scene_path:=$PIXI_PROJECT_ROOT/example_data/premapped_scenes/scene_office_legacy.pkl -p topic_camera_info:=/spectacular_ai/camera_info -p topic_color:=/spectacular_ai/color_image -p topic_depth:=/spectacular_ai/depth_image
     ```
 
     - Explanation of arguments:
@@ -80,6 +83,11 @@ Official perception pipeline of _Where Did I Leave My Glasses? Open-Vocabulary S
     ```bash
     ros2 bag play <path_to_your_unzipped_rosbag>
     ```
+
+### Configuration
+
+- **Library:** all options of the perception pipeline (detection, tracking, background map, visualization, ...) are defined with their defaults and descriptions in [`perceive_semantix_lib/src/perceive_semantix_lib/core/config.py`](perceive_semantix_lib/src/perceive_semantix_lib/core/config.py). Pass a `Config` object to `Scene` to change them (see the [raw data interface](interfaces/disk_io/main.py) for an example).
+- **ROS node:** topics, frames, publishing rates and map settings are ROS parameters, declared with descriptions in [`interfaces/ros2/perceive_semantix_ros2/perceive_semantix_ros2/main.py`](interfaces/ros2/perceive_semantix_ros2/perceive_semantix_ros2/main.py). Set them with `--ros-args -p <name>:=<value>`, or inspect them on a running node with `ros2 param list /perceive_semantix` and `ros2 param describe /perceive_semantix <name>`.
 
 ## Contributing
 

@@ -1,22 +1,34 @@
 import logging
 from pathlib import Path
-from typing import Iterable, Iterator, Literal, Optional, Union
+from typing import TYPE_CHECKING, Iterable, Iterator, Literal, Optional, Union
 from uuid import UUID
 
 import numpy as np
 import torch
 from jaxtyping import Bool, Float, UInt8
 from open3d import geometry
+from pyoctomap import ColorOcTree, OcTree  # pyright: ignore[reportAttributeAccessIssue]
 from scipy.spatial.transform import Rotation
 from supervision.detection.core import Detections
+from typeguard import typeguard_ignore
 
 from perceive_semantix_lib.core.geometry import GeometryBase, GeometryType, PointCloud, TensorPointCloud
 from perceive_semantix_lib.core.matching.matching import ObjectDetectionAdjacency
-from perceive_semantix_lib.core.occupancy_grid import OccupancyGrid
+from perceive_semantix_lib.core.occupancy_grid import OccupancyGrid, SparseVoxelGrid
 from perceive_semantix_lib.core.scene_object import SceneObject
 from perceive_semantix_lib.core.utils.object_classes import ObjectClasses
 
 logger = logging.getLogger(__name__)
+
+
+class _NoOpProxy:
+    """Swallows arbitrary attribute access and calls, so chains like `orr.blueprint.Grid(...)` are no-ops when rerun is disabled or unavailable."""
+
+    def __getattr__(self, name):
+        return self
+
+    def __call__(self, *args, **kwargs):
+        return None
 
 
 class OptionalReRun:
@@ -55,28 +67,119 @@ class OptionalReRun:
         else:
             logger.info("Rerun functionality is disabled in the config. Not using rerun for logging.")
 
+    def spawn(
+        self,
+        *,
+        port: int = 9876,
+        connect: bool = True,
+        memory_limit: str = "75%",
+        server_memory_limit: str = "1GiB",
+        hide_welcome_screen: bool = False,
+        detach_process: bool = True,
+        executable_name: str = "rerun",
+        executable_path: Optional[str] = None,
+        default_blueprint=None,
+        recording=None,
+    ) -> None:
+        """Spawn the rerun viewer, forwarding all arguments to rerun's own spawn/connect_grpc.
+
+        Works around a bug in rerun-sdk==0.34.1: rr.spawn() sets RERUN_APP_ONLY=true on the
+        viewer subprocess's environment.
+        """
+        if not self._config_use_rerun or self._rerun is None:
+            logger.debug(
+                "Skipping optional rerun call to 'spawn' because rerun usage is disabled or rerun is not installed."
+            )
+            return None
+
+        import rerun_bindings
+
+        rerun_bindings.spawn(
+            port=port,
+            memory_limit=memory_limit,
+            server_memory_limit=server_memory_limit,
+            hide_welcome_screen=hide_welcome_screen,
+            detach_process=detach_process,
+            executable_name=executable_name,
+            executable_path=executable_path,
+            extra_env=[],
+        )
+
+        if connect:
+            self._rerun.connect_grpc(
+                f"rerun+http://127.0.0.1:{port}/proxy",
+                recording=recording,
+                default_blueprint=default_blueprint,
+            )
+
     def __getattr__(self, name):
-        """Forward attributes and method calls to the rerun library if available and enabled."""
+        """Forward attributes and method calls to the rerun library if available and enabled.
 
-        def method(*args, **kwargs):
-            if self._config_use_rerun and self._rerun:
-                func = getattr(self._rerun, name, None)
-                if func:
-                    return func(*args, **kwargs)
-                else:
-                    logger.debug(f"'{name}' is not a valid rerun method.")
-            else:
-                if not self._config_use_rerun:
-                    logger.debug(f"Skipping optional rerun call to '{name}' because rerun usage is disabled.")
-                elif self._rerun is None:
-                    logger.debug(f"Skipping optional rerun call to '{name}' because rerun is not installed.")
+        Non-callable attributes (e.g. the `blueprint` submodule) are returned as-is so that
+        chained access like `orr.blueprint.Grid(...)` resolves directly against the real rerun
+        module instead of being wrapped.
+        """
+        if self._config_use_rerun and self._rerun:
+            attr = getattr(self._rerun, name, None)
+            if attr is None:
+                logger.debug(f"'{name}' is not a valid rerun attribute.")
+                return _NoOpProxy()
+            return attr
+        else:
+            if not self._config_use_rerun:
+                logger.debug(f"Skipping optional rerun call to '{name}' because rerun usage is disabled.")
+            elif self._rerun is None:
+                logger.debug(f"Skipping optional rerun call to '{name}' because rerun is not installed.")
+            return _NoOpProxy()
 
-        return method
+
+if TYPE_CHECKING:
+    import rerun as orr
+else:
+    orr = OptionalReRun()
+prev_logged_entities: set[str] = set()
 
 
-# basically the import statement (create the singleton instance)
-orr = OptionalReRun()
-prev_logged_entities = set()
+@typeguard_ignore
+def orr_set_blueprint(make_active: bool = True) -> Optional[orr.blueprint.Container]:
+    """Set the rerun blueprint for the application."""
+    if not orr._config_use_rerun:
+        return None
+    blueprint = orr.blueprint.Grid(
+        orr.blueprint.Spatial3DView(
+            name="Map",
+            origin="/world",
+            overrides={
+                "world/camera/depth_image": orr.blueprint.EntityBehavior(visible=False),
+                "world/objects/bbox": orr.blueprint.EntityBehavior(visible=False),
+                "world/objects/pcd_rgb": orr.blueprint.EntityBehavior(visible=False),
+                "world/occupancy_grid": orr.blueprint.EntityBehavior(visible=False),
+            },
+        ),
+        orr.blueprint.Vertical(
+            orr.blueprint.TimeSeriesView(
+                name="Stationarity",
+                origin="/stationarity",
+                axis_y=orr.blueprint.ScalarAxis(range=(0.0, 1.0), zoom_lock=True),
+                axis_x=orr.blueprint.TimeAxis(
+                    view_range=orr.blueprint.TimeRange(
+                        start=orr.blueprint.TimeRangeBoundary.cursor_relative(
+                            seconds=-5,
+                        ),
+                        end=orr.blueprint.TimeRangeBoundary.cursor_relative(seconds=0),
+                    ),
+                    zoom_lock=True,
+                ),
+            ),
+            orr.blueprint.Spatial2DView(
+                origin="world/camera",
+                overrides={"world/camera/depth_image": orr.blueprint.EntityBehavior(visible=False)},
+            ),
+        ),
+        column_shares=[2, 1],
+    )
+    orr.send_blueprint(blueprint, make_active=make_active, make_default=True)
+    return blueprint
 
 
 def orr_log_camera(
@@ -286,6 +389,131 @@ def orr_log_background_point_cloud(pcd: GeometryBase, log_as_detection: bool = F
     )
 
 
+_BACKGROUND_OCTREE_OCCUPIED_DEFAULT_COLOR = np.array([160, 160, 160], dtype=np.uint8)
+_BACKGROUND_OCTREE_EMPTY_COLOR = np.array([80, 140, 200], dtype=np.uint8)
+
+
+def _extract_leaf_points(
+    tree: Union[OcTree, ColorOcTree],
+    bbx_min: Float[np.ndarray, "3"],
+    bbx_max: Float[np.ndarray, "3"],
+    store_color: bool,
+    log_empty: bool,
+) -> tuple[
+    tuple[Optional[Float[np.ndarray, "M 3"]], Optional[UInt8[np.ndarray, "M 3"]], Optional[Float[np.ndarray, "M"]]],
+    Optional[tuple[Float[np.ndarray, "K 3"], Float[np.ndarray, "K"]]],
+]:
+    """Collect one point per leaf within a bounding box, at the leaf's own center and radius.
+
+    `tree.begin_leafs_bbx(bbx_min, bbx_max)` is a real bounded tree descent (the primitive
+    `extractPointCloud()` is built on internally), so this only visits leaves near the box rather than the
+    whole tree. Unlike a voxel grid, `Points3D` takes a radius per point, so a pruned/merged leaf (occupied or
+    free) is logged as a single larger point at its true size instead of being expanded into sub-voxels.
+
+    Returns ((occupied_points, occupied_colors, occupied_radii), empty) where each of the first tuple's entries
+    is None if no occupied leaves were found. `empty` is None if `log_empty` is False, otherwise
+    `(empty_points, empty_radii)` or None if no free leaves were found.
+    """
+    occ_points, occ_colors, occ_radii = [], [], []
+    empty_points, empty_radii = [], []
+
+    for leaf in tree.begin_leafs_bbx(bbx_min, bbx_max):
+        coord = np.array(leaf.getCoordinate())
+        radius = leaf.getSize() / 2.0
+
+        if tree.isNodeOccupied(leaf):
+            occ_points.append(coord)
+            occ_radii.append(radius)
+            color = (
+                np.array(leaf.getColor(), dtype=np.uint8) if store_color else _BACKGROUND_OCTREE_OCCUPIED_DEFAULT_COLOR
+            )
+            occ_colors.append(color)
+        elif log_empty:
+            empty_points.append(coord)
+            empty_radii.append(radius)
+
+    occupied = (np.stack(occ_points), np.stack(occ_colors), np.array(occ_radii)) if occ_points else (None, None, None)
+    empty = None
+    if log_empty:
+        empty = (np.stack(empty_points), np.array(empty_radii)) if empty_points else None
+    return occupied, empty
+
+
+def orr_log_background_octree(
+    tree: Union[OcTree, ColorOcTree],
+    dirty_bbox: Optional[tuple[Float[np.ndarray, "3"], Float[np.ndarray, "3"]]],
+    chunk_size_m: float = 2.0,
+    entity_base: str = "world/background_octree",
+    store_color: bool = False,
+    log_empty: bool = False,
+) -> None:
+    """Log the background occupancy octree to rerun as a set of chunked point clouds.
+
+    Rerun archetypes fully replace an entity's content on every `orr.log()` call, so the octree is split into
+    fixed-size XY chunks (each spanning the tree's full Z extent), each logged under its own entity path. Only
+    chunks overlapping `dirty_bbox` (the AABB of points and sensor origin touched by the most recent update) are
+    re-logged; untouched chunks keep showing their last-logged state without being resent. A touched chunk is
+    still re-sent in full (not just its changed voxels), since anything omitted from a log call is dropped from
+    the display -- `dirty_bbox` only controls which chunks get re-queried, not how much of a touched chunk is
+    included.
+
+    Args:
+        tree (Union[OcTree, ColorOcTree]): The background occupancy octree.
+        dirty_bbox (Optional[tuple[Float[np.ndarray, "3"], Float[np.ndarray, "3"]]]): The (min, max) world-frame
+            AABB touched by the most recent update, or None if nothing changed since the last call.
+        chunk_size_m (float): Size (in meters, XY only) of the chunks used to split the octree for logging.
+        entity_base (str): Base rerun entity path under which chunk entities (`<entity_base>/chunk_<cx>_<cy>`)
+            are logged.
+        store_color (bool): Whether `tree` is a `ColorOcTree` carrying per-voxel color. When True, each voxel is
+            logged with its stored color; otherwise every voxel is logged with a single flat gray, since no
+            per-voxel color is available.
+        log_empty (bool): Whether to also log free (non-occupied) leaves, under a `<chunk_entity>/empty` child
+            entity, in a single flat color distinct from occupied voxels. Free leaves are frequently pruned into
+            much larger blocks than occupied ones (entire empty rooms can collapse into one leaf), so this can
+            log a handful of very large points rather than a dense fill of the free volume. Off by default.
+
+    """
+    if not orr._config_use_rerun:
+        return
+    if dirty_bbox is None:
+        return
+
+    min_xyz, max_xyz = dirty_bbox
+    tree_z_range = (tree.getMetricMin()[2], tree.getMetricMax()[2])
+
+    cx0, cx1 = int(np.floor(min_xyz[0] / chunk_size_m)), int(np.floor(max_xyz[0] / chunk_size_m))
+    cy0, cy1 = int(np.floor(min_xyz[1] / chunk_size_m)), int(np.floor(max_xyz[1] / chunk_size_m))
+
+    for cx in range(cx0, cx1 + 1):
+        for cy in range(cy0, cy1 + 1):
+            chunk_min = np.array([cx * chunk_size_m, cy * chunk_size_m, tree_z_range[0]])
+            chunk_max = np.array([(cx + 1) * chunk_size_m, (cy + 1) * chunk_size_m, tree_z_range[1]])
+            entity_path = f"{entity_base}/chunk_{cx}_{cy}"
+
+            (occ_points, occ_colors, occ_radii), empty = _extract_leaf_points(
+                tree, chunk_min, chunk_max, store_color, log_empty
+            )
+            if occ_points is None:
+                orr.log(entity_path, orr.Clear(recursive=True))
+            else:
+                orr.log(entity_path, orr.Points3D(occ_points, colors=occ_colors, radii=occ_radii))
+
+            if log_empty:
+                empty_entity_path = f"{entity_path}/empty"
+                if empty is None:
+                    orr.log(empty_entity_path, orr.Clear(recursive=True))
+                else:
+                    empty_points, empty_radii = empty
+                    orr.log(
+                        empty_entity_path,
+                        orr.Points3D(
+                            empty_points,
+                            colors=np.tile(_BACKGROUND_OCTREE_EMPTY_COLOR, (empty_points.shape[0], 1)),
+                            radii=empty_radii,
+                        ),
+                    )
+
+
 def orr_log_scene_objects(objects: Iterator[SceneObject[GeometryType]], object_classes: ObjectClasses) -> None:
     """Log scene objects to rerun. Each object will have its point cloud and bounding box logged. The bounding box will be colored according to the object's class color determined from 'object_classes'.
 
@@ -459,6 +687,7 @@ def orr_log_associations(
     detections: Detections,
     object_adjacency: ObjectDetectionAdjacency,
     time_sec: float,
+    inview_object_ids: list[UUID] = [],
     log_detections: bool = False,
 ):
     """Log object-detection and object-objects associations as a graph to rerun.
@@ -466,6 +695,7 @@ def orr_log_associations(
     Args:
         objects (dict[UUID, SceneObject[GeometryType]]): A dictionary of scene objects keyed by their UUIDs.
         active_object_ids (list[UUID]): A list of UUIDs of active scene objects.
+        inview_object_ids (list[UUID]): A list of UUIDs of scene objects in view.
         detections (Detections): The current detections.
         object_adjacency (ObjectDetectionAdjacency): The object-detection adjacency information, mapping which detections where associated with which objects, and which objects were associated with which other objects.
         time_sec (float): The current timestamp in seconds.
@@ -508,13 +738,18 @@ def orr_log_associations(
     radii = [detection_radi if isinstance(id, int) else object_radi for id in node_ids]
 
     active_color = [0, 255, 0]
+    inview_color = [255, 165, 0]
     inactive_color = [100, 0, 0]
     deleted_color = [80, 80, 80]
     detection_color = [0, 100, 100]
     colors = []
     for id in node_ids:
         if isinstance(id, UUID):
-            if id in active_object_ids:
+            # in-view objects are yellow, active objects are green, inactive objects are dark red, deleted objects are gray
+            # in view objects will override active objects
+            if id in inview_object_ids:
+                colors.append(inview_color)
+            elif id in active_object_ids:
                 colors.append(active_color)
             elif id in objects.keys():
                 colors.append(inactive_color)
@@ -561,62 +796,60 @@ def log_occupancy_grid(
         image[unknown] = 127.0
     elif colormap == "raw":
         image = image + 128.0
-    image = np.expand_dims(image.T, axis=-1)
-    _log_image_as_mesh(entity_path, image, occupancy_grid.resolution, occupancy_grid.origin)
+
+    # grid is [x, y]; GridMap wants row-major [height(y), width(x)] data with row 0 at the top and rows
+    # extending downward (-y) from `translation`, so flip vertically to keep the lower-left corner anchored.
+    pixels = np.flipud(image.T).clip(0, 255).astype(np.uint8)
+    height, width = pixels.shape
+
+    orr.log(
+        entity_path,
+        orr.GridMap(
+            data=pixels.tobytes(),
+            format=orr.components.ImageFormat(width=width, height=height, color_model="L", channel_datatype="U8"),
+            cell_size=occupancy_grid.resolution,
+            translation=[float(occupancy_grid.origin[0]), float(occupancy_grid.origin[1]), -0.01],
+            colormap=orr.components.Colormap.Grayscale,
+        ),
+    )
 
 
-def _log_image_as_mesh(
-    entity_path: str,
-    image: Float[np.ndarray, "H W C"],
-    resolution: float,
-    origin: Float[np.ndarray, "2"],
-    z: float = -0.01,
-) -> None:
+def log_sparse_voxel_grid(voxel_grid: SparseVoxelGrid, entity_path: str) -> None:
+    """Log a sparse 3D voxel priority grid to rerun as a rainbow-colored point cloud.
+
+    Point color follows rerun's own Turbo colormap over the [0, 1] priority probability (blue = low, red = high), and alpha is set to that same probability so low-priority voxels fade out.
+
+    Args:
+        voxel_grid (SparseVoxelGrid): The voxel grid to log.
+        entity_path (str): The entity path in rerun.
+
+    """
     if not orr._config_use_rerun:
         return
 
-    H, W, C = image.shape
-    assert C in (1, 3), f"Expected image with 1 or 3 channels, got {C}."
+    if voxel_grid is None:
+        return
 
-    # Generate 2D grid of vertex positions (center of each pixel)
-    xs = np.arange(W) * resolution + origin[0] + resolution / 2
-    ys = np.arange(H) * resolution + origin[1] + resolution / 2
-    xv, yv = np.meshgrid(xs, ys)
+    if len(voxel_grid.coords) == 0:
+        orr.log(entity_path, orr.Clear(recursive=True))
+        return
 
-    # Flatten to (N, 3)
-    vertex_positions = np.stack([xv, yv, np.full_like(xv, z)], axis=-1).reshape(-1, 3)
+    if orr._rerun is None:
+        return
 
-    # Normalize colors if needed
-    vertex_colors = image.reshape(-1, C)
-    vertex_colors = vertex_colors.clip(0, 255).astype(np.uint8)
+    from rerun.utilities._turbo import turbo_colormap_data
 
-    # If grayscale, convert to RGB for visualization
-    if C == 1:
-        vertex_colors = np.repeat(vertex_colors, 3, axis=1)
+    positions = voxel_grid.origin + (voxel_grid.coords + 0.5) * voxel_grid.resolution
+    probabilities = (voxel_grid.values.astype(np.float32) + 128.0) / 255.0
 
-    # Create triangle indices for the pixel grid
-    triangles = []
-    for i in range(H - 1):
-        for j in range(W - 1):
-            v0 = i * W + j
-            v1 = v0 + 1
-            v2 = v0 + W
-            v3 = v2 + 1
-            # two triangles per pixel cell
-            triangles.append([v0, v2, v1])
-            triangles.append([v1, v2, v3])
-    triangle_indices = np.array(triangles, dtype=np.int32)
+    lut_indices = (probabilities * (len(turbo_colormap_data) - 1)).astype(int)
+    colors = (turbo_colormap_data[lut_indices] * 255).astype(np.uint8)
 
-    # Flat normals pointing along +z
-    vertex_normals = np.tile(np.array([0, 0, 1], dtype=np.float32), (H * W, 1))
+    max_radius = voxel_grid.resolution * 0.5
+    min_radius = max_radius * 0.01
+    radii = np.clip(probabilities * max_radius, min_radius, max_radius)
 
-    # Log the mesh
     orr.log(
         entity_path,
-        orr.Mesh3D(
-            vertex_positions=vertex_positions,
-            triangle_indices=triangle_indices,
-            vertex_colors=vertex_colors,
-            vertex_normals=vertex_normals,
-        ),
+        orr.Points3D(positions, colors=colors, radii=radii),
     )

@@ -1,3 +1,4 @@
+from logging import getLogger
 from typing import Optional, Self
 
 import numpy as np
@@ -8,6 +9,8 @@ from open3d.pipelines import registration  # type: ignore
 
 from perceive_semantix_lib.core.geometry.geometry_base import GeometryBase
 from perceive_semantix_lib.core.occupancy_grid import OccupancyGrid
+
+logger = getLogger(__name__)
 
 
 class PointCloud(GeometryBase):
@@ -51,6 +54,8 @@ class PointCloud(GeometryBase):
         img_width: int,
         min_depth: float,
         max_depth: float,
+        occlusion_margin: float,
+        depth_image: Optional[Float[torch.Tensor, "1 H W"]] = None,
         device: str = "cuda",
         preallocated_object_mask_count: int = 10,
         expected_visibility_threshold: float = 0.1,
@@ -58,6 +63,10 @@ class PointCloud(GeometryBase):
         object_projections = torch.zeros(
             (preallocated_object_mask_count, img_height, img_width), dtype=torch.uint8, device=device
         )
+        if depth_image is not None:
+            logger.warning(
+                "point_cloud geometry is deprecated for use with depth images, and occlusion reasoning is not implemented."
+            )
         number_expected_objects = 0
         expected_object_indices = []
         object_visibility_ratios = []

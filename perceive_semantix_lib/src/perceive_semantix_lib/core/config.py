@@ -163,6 +163,53 @@ class ObjectMatchingConfig:
 
 
 @dataclass(frozen=True)
+class BackgroundConfig:
+    """Parameters for the OctoMap-backed background occupancy tracker.
+
+    Attributes:
+        max_range_m (float): Maximum ray length (in meters) considered when raycasting background points into
+            the occupancy octree. Passing -1 disables the limit (the full ray from sensor origin to each measured
+            point is always inserted, regardless of length). Background points are not otherwise range-limited
+            (unlike `DetectionConfig.min_depth_m`/`max_depth_m`, which only apply to per-object detections).
+            Default is -1.0 (unlimited).
+
+        store_color (bool): Whether to store per-voxel RGB color (averaged from the input frames) in the
+            background occupancy octree, backed by a `ColorOcTree` instead of a plain `OcTree`. Increases memory
+            usage and octree serialization size. When disabled, background voxels carry no color information and
+            are rendered in a single flat gray when logged to rerun. Default is False.
+
+        resolution_m (float): Resolution (in meters) of the background occupancy octree, i.e. minimum voxel size. Default is 0.05.
+
+        lazy_eval (bool): Whether to merge collapse inner nodes whose children are all occupied or all free,
+            lazily (True) after each frame's background point cloud is inserted (False). This can reduce memory
+            usage and octree serialization size, but increases the time taken to insert each frame's background points.
+            Default is False.
+
+        rerun_chunk_size_m (float): Size (in meters, along the XY plane only - each chunk spans the full Z
+            range) of the square chunks used to split the background octree into independently-addressed rerun
+            entities, so that only chunks whose content changed in the current frame need to be re-logged.
+            Default is 2.0.
+
+        prob_hit (float, optional): Sensor model parameter for octomap P(occupied | hit). The probability that a voxel is actually
+            occupied, given that a ray's endpoint (a depth measurement) landed inside it (a "hit"). Higher values
+            make voxels become confidently occupied faster. Passing None uses pyoctomap's default (0.7). Default is None.
+
+        prob_miss (float, optional): Sensor model parameter for octomap P(occupied | miss). The probability that a voxel is actually
+            occupied, given that a ray passed through it as free space (a "miss"). Lower values carve voxels free
+            faster. Passing None uses pyoctomap's default (0.4). Default is None.
+
+    """
+
+    max_range_m: float = 5.0
+    store_color: bool = False
+    resolution_m: float = 0.05
+    lazy_eval: bool = False
+    rerun_chunk_size_m: float = 1.0
+    prob_hit: Optional[float] = None
+    prob_miss: Optional[float] = 0.3
+
+
+@dataclass(frozen=True)
 class DebugConfig:
     """Debugging and visualization parameters.
 
@@ -172,10 +219,18 @@ class DebugConfig:
         store_scene_each_frame (bool = False): Whether to store the scene state for each frame.
 
         enable_rerun (bool = True): Whether to enable rerun visualizations.
+        rerun_launch_mode (Literal["spawn", "serve_grpc", "connect_grpc"] = "serve_grpc"): How to launch/connect to rerun.
+            "spawn" opens a new local rerun viewer window. "serve_grpc" starts a gRPC server that a separately-launched
+            viewer can connect to. "connect_grpc" connects to an already-running rerun gRPC server/proxy at
+            `rerun_grpc_connect_url`. Default is "serve_grpc" ("spawn" is currently broken with rerun-sdk 0.34.1: it
+            launches the viewer with `RERUN_APP_ONLY=true` set, which crashes rerun's own CLI entry point with
+            `ImportError: cannot import name '_dec_active_tracing_sessions'` - an upstream bug, not fixable here).
+        rerun_grpc_connect_url (str = "rerun+http://127.0.0.1:9876/proxy"): URL of the rerun gRPC server/proxy to
+            connect to when `rerun_launch_mode` is "connect_grpc". Unused otherwise.
         rerun_visualize_detections_2d (bool = False): Whether to visualize 2D detections (segmented input image) in rerun.
         rerun_visualize_detections (bool = False): Whether to visualize 3D detections in rerun.
         rerun_visualize_detection_background_points (bool = False): Whether to visualize background points of detections in rerun.
-        rerun_visualize_background_points (bool = False): Whether to visualize background points in rerun.
+        rerun_visualize_background_points (bool = False): Whether to visualize the background occupancy octree (as chunked point clouds) in rerun.
         rerun_visualize_expected_objects (bool = False): Whether to visualize the projection of expected objects onto the camera in rerun.
         rerun_visualize_object_matches (bool = False): Whether to visualize object matches in rerun.
 
@@ -186,6 +241,8 @@ class DebugConfig:
     store_scene_each_frame: bool = False
 
     enable_rerun: bool = True
+    rerun_launch_mode: Literal["spawn", "serve_grpc", "connect_grpc"] = "spawn"
+    rerun_grpc_connect_url: str = "rerun+http://127.0.0.1:9876/proxy"
     rerun_visualize_detections_2d: bool = False
     rerun_visualize_detections: bool = False
     rerun_visualize_detection_background_points: bool = False
@@ -207,7 +264,8 @@ class Config:
         pocd_visibility_threshold (float = 0.1): When `pocd_visibility_threshold` of the object's points are visible in the current camera fov it is considered visible.
         preallocate_visible_objects_mask_count (int = 10): For each expected (i.e., in-view) object a mask of its projection is returned. This parameter controls how many mask tensors are preallocated. Affects computation speed.
         downsample_voxel_size (float = 0.025): Minimum distance between point cloud points in meters.
-        downsample_background_voxel_size (float = 0.05): ``downsample_voxel_size`` for the background geometry.
+        downsample_background_voxel_size (float = 0.05): Resolution (in meters) of the background occupancy octree,
+            i.e. the minimum distinguishable background geometry size.
 
         semantic_stationarity_prior (bool = True): Whether to query LLM for stationarity prior of object classes.
 
@@ -228,6 +286,7 @@ class Config:
         detection (DetectionConfig): Configuration parameters for object detection.
         debug (DebugConfig): Configuration parameters for debugging and visualization.
         matching (ObjectMatchingConfig): Configuration parameters for object matching and re-identification.
+        background (BackgroundConfig): Configuration parameters for the background occupancy octree.
 
     """
 
@@ -239,7 +298,6 @@ class Config:
     pocd_visibility_threshold: float = 0.25
     preallocate_visible_objects_mask_count: int = 10
     downsample_voxel_size: float = 0.025
-    downsample_background_voxel_size: float = 0.05
 
     semantic_stationarity_prior: bool = True
 
@@ -254,9 +312,11 @@ class Config:
     merging_interval_frames: int = 5
     merge_overlap_threshold: float = 0.7
     merge_visual_threshold: float = 0.8
+    occlusion_margin_m: float = 0.05
 
     geometry_type: Literal["pointcloud", "tensor_pointcloud"] = "tensor_pointcloud"
 
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
     matching: ObjectMatchingConfig = field(default_factory=ObjectMatchingConfig)
+    background: BackgroundConfig = field(default_factory=BackgroundConfig)

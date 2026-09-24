@@ -8,7 +8,7 @@ name = "perceive_semantix_lib"
 version = "0.0.2"
 
 [package.build]
-backend = { name = "pixi-build-python", version = ">=0.3.2" }
+backend = { name = "pixi-build-python", version = "*" }
 
 [package.host-dependencies]
 hatchling = "*"
@@ -19,7 +19,7 @@ open-clip-torch = "*"
 jaxtyping = "*"
 supervision = "*"
 typeguard = "2.*" # apparently version 3.* and 4.* have some issues for jaxtyping
-rerun-sdk = "*"
+rerun-sdk = "==0.34.1"
 openai = "*"
 joblib = "*"
 py-opencv = "*"

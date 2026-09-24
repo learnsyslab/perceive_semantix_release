@@ -18,6 +18,7 @@
   <depend>geometry_msgs</depend>
   <depend>message_filters</depend>
   <depend>nav_msgs</depend>
+  <depend>octomap_msgs</depend>
   <depend>rcl_interfaces</depend>
   <depend>sensor_msgs</depend>
   <depend>tf2_ros</depend>

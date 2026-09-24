@@ -9,6 +9,7 @@ from jaxtyping import Float
 from typeguard import check_type
 
 from perceive_semantix_lib.core.background_tracker import BackgroundTracker
+from perceive_semantix_lib.core.config import BackgroundConfig
 from perceive_semantix_lib.core.geometry import GeometryType, PointCloud
 from perceive_semantix_lib.core.object_tracker import ObjectTracker
 from perceive_semantix_lib.core.scene_object import SceneObject
@@ -19,6 +20,10 @@ from perceive_semantix_lib.core.utils.pocd_datatypes import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Legacy scene pickles predate the octomap-backed BackgroundTracker and don't carry a resolution setting;
+# match Config.downsample_background_voxel_size's default.
+_LEGACY_BACKGROUND_RESOLUTION = 0.05
 
 
 def _load_object_legacy(
@@ -83,7 +88,7 @@ def _load_object_legacy(
 
 def load_scene_legacy(
     scene_dict: dict[str, Any], geometry_type: type[GeometryType] = PointCloud
-) -> tuple[ObjectTracker, BackgroundTracker[GeometryType], float, Optional[Float[np.ndarray, "4 4"]]]:
+) -> tuple[ObjectTracker, BackgroundTracker, float, Optional[Float[np.ndarray, "4 4"]]]:
     """Load a scene from a legacy pickle file."""
     camera_pose: Optional[Float[np.ndarray, "4 4"]] = scene_dict.get("camera_pose", None)
     frame_index: int = int(scene_dict.get("frame_index", 0))
@@ -93,9 +98,13 @@ def load_scene_legacy(
     missing_objects: list = scene_dict.get("missing_objects", [])
 
     background_points: np.ndarray = scene_dict.get("background_points", np.empty((0, 3), dtype=np.float32))
-    background_colors: Optional[np.ndarray] = scene_dict.get("background_colors", None)
-    background_tracker = BackgroundTracker(geometry_type=geometry_type)
-    background_tracker.geometry = geometry_type.from_serializable((background_points, background_colors))
+    background_tracker = BackgroundTracker(BackgroundConfig(resolution_m=_LEGACY_BACKGROUND_RESOLUTION))
+    if background_points.shape[0] > 0:
+        # Legacy pickles never recorded sensor origins, so there's no ray information to carve free space
+        # from - best-effort insert the points as occupied-only (no raycasting).
+        background_tracker.tree.updateNodes(background_points.astype(np.float64), True, lazy_eval=True)
+        background_tracker.tree.updateInnerOccupancy()
+        background_tracker.ground_projection_dirty = True
 
     object_tracker = ObjectTracker()
     for obj_dict in active_objects:

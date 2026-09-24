@@ -1,13 +1,14 @@
 import logging
 import os
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Union
 from uuid import UUID
 
 import numpy as np
 import torch
 from jaxtyping import Bool, Float, UInt8, install_import_hook
 from open3d import geometry
+from pyoctomap import ColorOcTree, OcTree  # pyright: ignore[reportAttributeAccessIssue]
 from supervision.detection.core import Detections
 
 if os.getenv("ENABLE_RUNTIME_TYPECHECKING", "0") == "1":
@@ -16,7 +17,7 @@ else:
     hook = None
 from perceive_semantix_lib.core.background_tracker import BackgroundTracker
 from perceive_semantix_lib.core.config import Config
-from perceive_semantix_lib.core.geometry import GeometryBase, PointCloud, TensorPointCloud
+from perceive_semantix_lib.core.geometry import PointCloud, TensorPointCloud
 from perceive_semantix_lib.core.input_types import InputData, InputDataStamped, TorchInputData
 from perceive_semantix_lib.core.matching.matching import (
     ObjectDetectionAdjacency,
@@ -36,6 +37,7 @@ from perceive_semantix_lib.core.utils.optional_rerun_wrapper import (
     OptionalReRun,
     orr_log_annotated_image,
     orr_log_associations,
+    orr_log_background_octree,
     orr_log_background_point_cloud,
     orr_log_camera,
     orr_log_detections_matches,
@@ -43,6 +45,7 @@ from perceive_semantix_lib.core.utils.optional_rerun_wrapper import (
     orr_log_point_clouds_bounding_boxes,
     orr_log_scene_objects,
     orr_log_stationarity,
+    orr_set_blueprint,
 )
 from perceive_semantix_lib.core.utils.pocd_datatypes import POCDObjectTypes, StandardDistributedValue
 from perceive_semantix_lib.core.utils.visualize_helpers import vis_result_fast
@@ -92,7 +95,19 @@ class Scene:
         self.orr = OptionalReRun()
         self.orr.set_use_rerun(self.config.debug.enable_rerun)
         self.orr.init("perceive_semantix_scene")
-        self.orr.spawn()
+        blueprint = orr_set_blueprint()
+        if self.config.debug.rerun_launch_mode == "spawn":
+            self.orr.spawn()
+        elif self.config.debug.rerun_launch_mode == "serve_grpc":
+            server_info = self.orr.serve_grpc(
+                server_memory_limit="500MiB", newest_first=True, default_blueprint=blueprint
+            )
+            if server_info is not None:
+                logger.info(f"Rerun server started at: '{server_info}'")
+        elif self.config.debug.rerun_launch_mode == "connect_grpc":
+            self.orr.connect_grpc(self.config.debug.rerun_grpc_connect_url)
+        else:
+            raise ValueError(f"Unsupported rerun launch mode: {self.config.debug.rerun_launch_mode}")
 
         self.disk = DiskStorage(Path(self.config.debug.output_root))
 
@@ -137,7 +152,7 @@ class Scene:
         """
         if path is None:
             self.objects: ObjectTracker = ObjectTracker()
-            self.background = BackgroundTracker(geometry_type=self.geometry_type)
+            self.background = BackgroundTracker(self.config.background)
             self.previous_camera_pose: Optional[Float[np.ndarray, "4 4"]] = None
         else:
             self.objects, self.background, self.last_frame_time_sec, self.previous_camera_pose = DiskStorage.load_scene(
@@ -197,9 +212,18 @@ class Scene:
         if self.config.debug.rerun_visualize_detection_background_points:
             orr_log_background_point_cloud(background_points, log_as_detection=True)
 
-    def _log_background_points(self, background_points: GeometryBase) -> None:
+    def _log_background_octree(
+        self,
+        tree: Union[OcTree, ColorOcTree],
+        dirty_bbox: Optional[tuple[Float[np.ndarray, "3"], Float[np.ndarray, "3"]]],
+    ) -> None:
         if self.config.debug.rerun_visualize_background_points:
-            orr_log_background_point_cloud(background_points, log_as_detection=False)
+            orr_log_background_octree(
+                tree,
+                dirty_bbox,
+                chunk_size_m=self.config.background.rerun_chunk_size_m,
+                store_color=self.background.store_color,
+            )
 
     def _log_expected_objects_projections(self, object_projections: Bool[torch.Tensor, "N H W"]) -> None:
         if self.config.debug.rerun_visualize_expected_objects and object_projections.shape[0] > 0:
@@ -278,15 +302,15 @@ class Scene:
             obj for obj in self.objects.active_objects() if len(obj.observation_times) >= min_number_of_observations
         )
 
-    def get_background(self) -> GeometryBase:
-        """Get the current background geometry.
+    def get_background(self) -> Union[OcTree, ColorOcTree]:
+        """Get the current background occupancy octree.
 
         Returns:
-            GeometryBase: The current background geometry.
+            Union[OcTree, ColorOcTree]: The current background occupancy octree.
 
         """
         with self.background.lock:
-            return self.background.geometry
+            return self.background.tree
 
     def step(self, posed_rgbd: InputDataStamped) -> None:
         """Process a new input frame, updating the scene's belief state.
@@ -298,6 +322,7 @@ class Scene:
         """
         logger.info(f"################### frame {self.frame_count} ({posed_rgbd.time_sec:0.2f})")
         logger.debug(f"active objects: {[o.id_str for o in self.objects.active_objects()]}")
+        orr_set_blueprint(make_active=False)
         self._log_input(posed_rgbd.time_sec, posed_rgbd.data)
 
         if posed_rgbd.data is not None:
@@ -315,9 +340,10 @@ class Scene:
             )
 
             self.background.async_add_background_points(
-                background_pc,
-                self.config.downsample_background_voxel_size,
-                current_xy=tuple(torch_input_data.pose[:2, 3].cpu().tolist()),
+                background_pc.numpy_points(),
+                torch_input_data.pose[:3, 3].cpu().numpy().astype(np.float64),
+                max_range=self.config.background.max_range_m,
+                colors_world=background_pc.numpy_colors() if self.config.background.store_color else None,
             )
             detections = self.detector.post_process_3d_detections(detections, self.config.downsample_voxel_size)
             self._log_detections(posed_rgbd.data.color, detections, posed_rgbd.time_sec)
@@ -332,6 +358,8 @@ class Scene:
                 self.config.input_image_width,
                 self.config.detection.min_depth_m,
                 self.config.detection.max_depth_m,
+                self.config.occlusion_margin_m,
+                torch_input_data.depth,
                 device=self.config.device,
                 visibility_threshold=self.config.pocd_visibility_threshold,
                 preallocate_object_mask_count=self.config.preallocate_visible_objects_mask_count,
@@ -443,7 +471,12 @@ class Scene:
             detections, clip_features, posed_rgbd.time_sec, object_adjacency, self.config.downsample_voxel_size
         )
         orr_log_associations(
-            self.objects.objects, self.objects.active, detections, object_adjacency, posed_rgbd.time_sec
+            self.objects.objects,
+            self.objects.active,
+            detections,
+            object_adjacency,
+            posed_rgbd.time_sec,
+            inview_object_ids=inview_object_ids,
         )
 
         # Apply post-processing steps periodically
@@ -466,7 +499,7 @@ class Scene:
         orr_log_scene_objects(self.objects.active_objects(), self.detector.object_classes)
         self.background.wait_until_processed()
         with self.background.lock:
-            self._log_background_points(self.background.geometry)
+            self._log_background_octree(self.background.tree, self.background.last_update_bbox)
 
         self.last_frame_time_sec = posed_rgbd.time_sec
         if posed_rgbd.data is not None:

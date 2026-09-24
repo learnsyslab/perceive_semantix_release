@@ -127,7 +127,7 @@ class DiskStorage:
             return load_scene_legacy(scene_dict, geometry_type=geometry_type)
 
         object_tracker = ObjectTracker.from_dict(scene_dict["objects"], device=device, geometry_type=geometry_type)
-        background_tracker = BackgroundTracker.from_dict(scene_dict["background"], geometry_type=geometry_type)
+        background_tracker = BackgroundTracker.from_dict(scene_dict["background"])
         time_sec: float = scene_dict["time_sec"]
         camera_pose: Optional[Float[np.ndarray, "4 4"]] = scene_dict["camera_pose"]
         logger.info(f"Unpickled scene from {path.resolve()}")

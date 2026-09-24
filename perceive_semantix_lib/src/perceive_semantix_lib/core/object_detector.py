@@ -12,7 +12,7 @@ from PIL import Image as PILImage
 from PIL.Image import Image
 from supervision.detection.core import Detections
 from typeguard import typechecked as typechecker
-from ultralytics.models import SAM, YOLO
+from ultralytics.models import SAM, YOLO, YOLOWorld
 
 from perceive_semantix_lib.core.config import DetectionConfig
 from perceive_semantix_lib.core.geometry import GeometryType
@@ -51,7 +51,9 @@ class ObjectDetector(Generic[GeometryType]):
         self.detection_model.set_classes(self.object_classes.get_classes_arr())  # type: ignore
 
     @staticmethod
-    def load_ultralytics_model(model_name: str, cache_dir: Optional[Path], model_constructor: Callable) -> YOLO | SAM:
+    def load_ultralytics_model(
+        model_name: str, cache_dir: Optional[Path], model_constructor: Callable
+    ) -> YOLO | SAM | YOLOWorld:
         """Load a Ultralytics model (YOLO or SAM) with weights cached in a custom directory."""
         if cache_dir is None:
             model = model_constructor(model_name)

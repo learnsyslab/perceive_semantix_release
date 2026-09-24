@@ -4,7 +4,7 @@ from typing import Optional, Self
 import numpy as np
 import open3d.core as o3c  # pyright: ignore[reportMissingImports]
 import torch
-from jaxtyping import Float, UInt8
+from jaxtyping import Bool, Float, UInt8
 from open3d import geometry as geometry_legacy  # pyright: ignore[reportMissingImports]
 from open3d.pipelines import registration as registration_legacy  # type: ignore
 from open3d.t import geometry  # pyright: ignore[reportMissingImports]
@@ -67,6 +67,8 @@ class TensorPointCloud(GeometryBase):
         img_width: int,
         min_depth: float,
         max_depth: float,
+        occlusion_margin: float,
+        depth_image: Optional[Float[torch.Tensor, "1 H W"]] = None,
         device: str = "cuda",
         preallocated_object_mask_count: int = 10,
         expected_visibility_threshold: float = 0.1,
@@ -108,7 +110,20 @@ class TensorPointCloud(GeometryBase):
                 depth_max=max_depth,
             ).as_tensor()
             depth_projection_torch: torch.Tensor = torch_dlpack.from_dlpack(depth_projection.to_dlpack())
-            num_expected_points = depth_projection_torch.count_nonzero().item()
+
+            valid_depth_mask = depth_projection_torch > 0
+            if depth_image is None:
+                visible_depth_mask = valid_depth_mask
+            else:
+                depth_projection_torch /= 1000.0  # convert to meters
+                depth_image = depth_image.to(depth_projection_torch.device)
+                visible_depth_mask = cls._erase_occluded_region(
+                    depth_image=depth_image,
+                    depth_projection_torch=depth_projection_torch,
+                    valid_depth_mask=valid_depth_mask,
+                    occlusion_margin=occlusion_margin,
+                )
+            num_expected_points = visible_depth_mask.count_nonzero().item()
 
             visibility_ratio = float(num_expected_points) / len(obj) if len(obj) > 0 else 0.0
             if visibility_ratio < expected_visibility_threshold:
@@ -118,7 +133,7 @@ class TensorPointCloud(GeometryBase):
                 object_projections = torch.cat(
                     [object_projections, torch.zeros_like(object_projections, device=device)], dim=0
                 )
-            object_projections[number_expected_objects, ...] = (depth_projection_torch > 0).to(torch.uint8).squeeze()
+            object_projections[number_expected_objects, ...] = visible_depth_mask.to(torch.uint8).squeeze()
             expected_object_indices.append(idx)
             object_visibility_ratios.append(visibility_ratio)
             number_expected_objects += 1
@@ -306,3 +321,36 @@ class TensorPointCloud(GeometryBase):
 
     def crop(self, bounding_box: geometry_legacy.AxisAlignedBoundingBox) -> None:
         self.pcd = self.pcd.crop(geometry.AxisAlignedBoundingBox.from_legacy(bounding_box, device=self.pcd.device))
+
+    def _erase_occluded_region(
+        depth_image: Float[torch.Tensor, "1 H W"],
+        depth_projection_torch: Float[torch.Tensor, "H W 1"],
+        valid_depth_mask: Bool[torch.Tensor, "H W 1"],
+        occlusion_margin: float,
+    ) -> UInt8[torch.Tensor, "H W 1"]:
+        """Erase occluded regions in a objectdepth projection.
+
+        Args:
+            depth_image (Float[torch.Tensor, "1 H W"]): The depth image as a (1, H, W) tensor.
+            depth_projection_torch (Float[torch.Tensor, "H W 1"]): The depth projection as a torch tensor.
+            valid_depth_mask (Bool[torch.Tensor, "H W 1"]): A boolean mask indicating which pixels in the depth projection are valid (i.e., have a depth value greater than 0).
+            occlusion_margin (float): Margin in meters to consider for occlusion.
+
+        Returns:
+            torch.Tensor: The occlusion-aware mask as a (H, W, 1) tensor.
+
+        """
+        device = depth_image.device
+        img_height, img_width = depth_projection_torch.shape[:2]
+
+        # depth_image_aligned: (1, 640, 360), depth_projection_torch: (640, 360, 1)
+        depth_image = depth_image.reshape((img_height, img_width, 1)).to(device)
+
+        # A pixel is considered visible if the depth projection is less than the depth image (with margin) and the depth projection is valid
+        visible_depth_mask = torch.where(
+            torch.logical_or(depth_image == 0, depth_projection_torch < depth_image + occlusion_margin),
+            valid_depth_mask,
+            torch.zeros_like(depth_image),
+        )
+
+        return visible_depth_mask.to(torch.uint8)

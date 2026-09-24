@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from jaxtyping import Float, Int8
+from jaxtyping import Float, Int, Int8
 from open3d import geometry
 
 
@@ -66,3 +66,17 @@ class OccupancyGrid:
         grid[indices[~occupied_mask, 0], indices[~occupied_mask, 1]] = 0
         grid[indices[occupied_mask, 0], indices[occupied_mask, 1]] = 1
         return OccupancyGrid(origin=origin, resolution=resolution, grid=grid)
+
+
+@dataclass
+class SparseVoxelGrid:
+    """Sparse 3D analogue of :class:`OccupancyGrid`. Only voxels with a value are stored explicitly; any voxel not listed in ``coords`` is implicitly background.
+
+    ``coords`` are integer voxel indices relative to ``origin``, i.e. the world-space position of voxel ``coords[i]`` is ``origin + coords[i] * resolution``.
+    """
+
+    origin: Float[np.ndarray, "3"]
+    resolution: float
+
+    coords: Int[np.ndarray, "N 3"]
+    values: Int8[np.ndarray, "N"]

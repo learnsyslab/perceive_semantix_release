@@ -414,6 +414,8 @@ class SceneObject(Generic[GeometryType]):
         img_width: int,
         min_depth: float,
         max_depth: float,
+        occlusion_margin: float,
+        occluding_depth_image: Optional[Float[torch.Tensor, "1 1 H W"]] = None,
         visibility_threshold: float = 0.35,
         preallocate_object_mask_count: int = 10,
         device: str = "cuda",
@@ -428,6 +430,8 @@ class SceneObject(Generic[GeometryType]):
             img_width (int): Image width to project on.
             min_depth (float): Minimum depth to consider.
             max_depth (float): Maximum depth to consider.
+            occlusion_margin (float): Margin in meters to consider for occlusion.
+            occluding_depth_image (Optional[Float[torch.Tensor, "1 1 H W"]]): Raw depth image from the camera that is used to determine occlusion.
             visibility_threshold (float): Minimum ratio of visible points to total points to consider an object as expected.
             preallocate_object_mask_count (int): Number of object masks to preallocate.
             device (str): Device to use for computation.
@@ -439,6 +443,10 @@ class SceneObject(Generic[GeometryType]):
 
         """
         # somehow hacky way to do get the correct type (PointCloud or TensorPointCloud), this is necessary because batch_project_to_camera is a class method
+        if occluding_depth_image is None:
+            logger.warning("Occluding depth image is required for projecting objects onto camera.")
+        else:
+            occluding_depth_image = occluding_depth_image.squeeze(0)  # (1, 1, H, W) -> (1, H, W)
         geom_class = type(objects[0].geometry) if len(objects) > 0 else TensorPointCloud
         expected_object_indices, object_visibility_ratio, object_projections = geom_class.batch_project_to_camera(
             [obj.geometry for obj in objects],
@@ -448,6 +456,8 @@ class SceneObject(Generic[GeometryType]):
             img_width,
             min_depth,
             max_depth,
+            occlusion_margin,
+            occluding_depth_image,
             device,
             preallocated_object_mask_count=preallocate_object_mask_count,
             expected_visibility_threshold=visibility_threshold,
