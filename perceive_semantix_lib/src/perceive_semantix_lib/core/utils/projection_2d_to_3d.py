@@ -104,12 +104,13 @@ def detections_to_3d_pointcloud_and_bounding_boxes(
     detections = detections[valid_detection_indices]  # type: ignore
     detections.data["point_clouds"] = point_clouds
     detections.data["bounding_boxes"] = bounding_boxes
+    # Full resolution: sparse rays leave stale occupied voxels uncleared.
     background_pcd = geometry_type.from_point_tensor(
         bg_points,
         bg_colors,
         min_points_threshold=-1,
         camera_pose=camera_pose,
-        obj_pcd_max_points=obj_pcd_max_points,
+        obj_pcd_max_points=-1,
     )
     if background_pcd is None:
         background_pcd = geometry_type()

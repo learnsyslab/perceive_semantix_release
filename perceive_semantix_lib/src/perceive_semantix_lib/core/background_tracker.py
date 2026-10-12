@@ -122,7 +122,13 @@ class BackgroundTracker:
     ) -> None:
         if points_world.shape[0] == 0:
             return
-        points_world = np.ascontiguousarray(points_world, dtype=np.float64)
+        # One ray per endpoint voxel; pyoctomap's discretize=True crashes for OcTree. Keys: 21 bits/axis, offset.
+        keys = np.floor(points_world / self.resolution).astype(np.int64) + (1 << 20)
+        packed = (keys[:, 0] << 42) | (keys[:, 1] << 21) | keys[:, 2]
+        _, first_in_voxel = np.unique(packed, return_index=True)
+        points_world = np.ascontiguousarray(points_world[first_in_voxel], dtype=np.float64)
+        if colors_world is not None:
+            colors_world = colors_world[first_in_voxel]
         sensor_origin_world = np.ascontiguousarray(sensor_origin_world, dtype=np.float64)
 
         with self.lock:
@@ -147,17 +153,12 @@ class BackgroundTracker:
             )
 
     def to_dict(self) -> dict:
-        # Written to a real path rather than in-memory: ColorOcTree.writeBinary requires a filename since it
-        # appends a color trailer to the file after the core library writes the occupancy data.
-        with tempfile.NamedTemporaryFile(suffix=".bt", delete=False) as tmp:
-            tmp_path = tmp.name
-        try:
-            self.tree.writeBinary(tmp_path)
-            octomap_binary = Path(tmp_path).read_bytes()
-        finally:
-            Path(tmp_path).unlink()
+        # Not writeBinary(): it converts the live tree to max-likelihood, discarding log-odds.
+        octomap_full = self.tree.write()
+        if octomap_full is False:
+            raise RuntimeError("Failed to serialize background octree")
         return {
-            "octomap_binary": octomap_binary,
+            "octomap_full": octomap_full,
             "resolution": self.resolution,
             "store_color": self.store_color,
         }
@@ -166,11 +167,22 @@ class BackgroundTracker:
     def from_dict(cls, data: dict[str, Any]) -> "BackgroundTracker":
         config = BackgroundConfig(resolution_m=data["resolution"], store_color=data.get("store_color", False))
         obj = cls(config)
-        with tempfile.NamedTemporaryFile(suffix=".bt", delete=False) as tmp:
-            tmp.write(data["octomap_binary"])
+        # Older scenes only carry the binary format.
+        is_full = "octomap_full" in data
+        with tempfile.NamedTemporaryFile(suffix=".ot" if is_full else ".bt", delete=False) as tmp:
+            tmp.write(data["octomap_full"] if is_full else data["octomap_binary"])
             tmp_path = tmp.name
         try:
-            obj.tree.readBinary(tmp_path)
+            if is_full:
+                # read() builds a fresh tree with the default sensor model; restore ours.
+                tree = obj.tree.read(tmp_path)
+                if tree is None:
+                    raise ValueError("Failed to read background octree from scene")
+                tree.setProbHit(obj.tree.getProbHit())
+                tree.setProbMiss(obj.tree.getProbMiss())
+                obj.tree = tree
+            else:
+                obj.tree.readBinary(tmp_path)
         finally:
             Path(tmp_path).unlink()
         obj.ground_projection_dirty = True

@@ -1,3 +1,4 @@
+import array
 import logging
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence, Union
@@ -49,7 +50,7 @@ def _strip_octomap_file_header(data: bytes) -> bytes:
     _octomap_file_header_terminator = b"\ndata\n"
     idx = data.find(_octomap_file_header_terminator)
     if idx == -1:
-        raise ValueError("Unexpected octomap binary format: no 'data' header terminator found")
+        raise ValueError("Unexpected octomap format: no 'data' header terminator found")
     return data[idx + len(_octomap_file_header_terminator) :]
 
 
@@ -424,16 +425,11 @@ class PerceiveSemantixNode(Node):
         msg.header.stamp = RosTime.to_msg(time)
         msg.id = tree.getTreeType()
         msg.resolution = float(tree.getResolution())
-        # Binary format is compact but can't encode color; use the full format for ColorOcTree.
-        if isinstance(tree, ColorOcTree):
-            msg.binary = False
-            raw = tree.write()
-        else:
-            msg.binary = True
-            raw = tree.writeBinary()
-        # data is int8[]; reinterpret (not naively list) the raw bytes as signed int8.
-        binary_payload = _strip_octomap_file_header(raw)
-        msg.data = np.frombuffer(binary_payload, dtype=np.uint8).astype(np.int8).tolist()
+        # Not writeBinary(): it converts the live tree to max-likelihood, so voxels would never clear.
+        msg.binary = False
+        raw = tree.write()
+        # data is int8[]; array('b') reinterprets the raw bytes as signed without a per-element Python list.
+        msg.data = array.array("b", _strip_octomap_file_header(raw))
         self.publisher_background.publish(msg)
 
     def _publish_occupancy_map(self, occupancy_grid: OccupancyGrid, time: RosTime) -> None:
